@@ -1,0 +1,126 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import time
+import runpy
+
+import wacom_lib
+
+from pyudev import Context, Monitor, MonitorObserver
+from datetime import datetime
+
+from sh import notify_send
+
+MIN_REINIT_SECS = 5
+DELAY_SECS = 1
+
+_last_trigger = None
+
+
+def init_wacom(set_profile=True):
+    print 'Initializing...'
+
+    if 'wacom_config' in sys.modules:
+        reload(sys.modules['wacom_config'])
+    else:
+        __import__('wacom_config')
+
+    if set_profile and not wacom_lib._current_profile:
+        wacom_lib.set_profile(wacom_lib._default_profile)
+
+    print 'Finished wacom init.'
+
+
+def reload_stored_profile():
+    profile = wacom_lib.get_stored_profile()
+    if profile:
+        wacom_lib.set_profile(profile)
+        print "Using saved profile for button action"
+
+
+def monitor_event(action, device):
+    global _last_trigger
+
+    if _last_trigger is not None and time.time() - _last_trigger < MIN_REINIT_SECS:
+        return
+
+    name = device.get("NAME")
+    if not name:
+        return
+
+    name = name.replace('"', '') # :/
+    print device.action, name
+
+    if any([ x.startswith(name) for x in (wacom_lib.all_inputs) ]):
+        if action == "add":
+            print "Wacom tablet added:", name
+            time.sleep(DELAY_SECS)
+
+            wacom_lib.get_active_targets(refresh=True)
+            reload_stored_profile()
+            init_wacom()
+            _last_trigger = time.time()
+
+            notify_send("Tablet Attached",
+                        "Device '%s' has been initialized." % name,
+                        icon="input-tablet",
+                        expire_time=2000)
+        elif action == "remove":
+            _last_trigger = time.time()
+
+            print "Wacom tablet removed:", name
+            notify_send("Tablet Removed",
+                        "Device '%s' has been disconnected." % name,
+                        icon="input-tablet",
+                        expire_time=2000)
+
+
+def monitor():
+    if wacom_lib.get_active_targets().intersection(wacom_lib.stylus):
+        print "Device already connected, initializing ..."
+        init_wacom()
+
+    ctx = Context()
+    mon = Monitor.from_netlink(ctx)
+    mon.filter_by("input")
+
+    obs = MonitorObserver(mon, event_handler=monitor_event)
+    #obs.daemon = False
+    obs.start()
+
+    print "Monitoring input devices..."
+
+    try:
+        while obs.isAlive:
+            obs.join(1)
+    except KeyboardInterrupt:
+        sys.exit(0)
+
+    print "done"
+
+
+def main():
+    if len(sys.argv) > 1:
+        arg = sys.argv[1]
+
+        if arg == "monitor":
+            monitor()
+        else:
+            wacom_lib.SIMULATE = True
+            init_wacom(set_profile=False)
+
+            if sys.argv[1] in wacom_lib._profiles:
+                wacom_lib.SIMULATE = False
+                wacom_lib.set_profile(sys.argv[1])
+            else:
+                reload_stored_profile()
+                wacom_lib.SIMULATE = False
+
+                wacom_lib._action_map[int(sys.argv[1])]()
+    else:
+        init_wacom()
+
+
+if __name__ == '__main__':
+    main()
